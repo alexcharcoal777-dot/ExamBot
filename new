@@ -1,0 +1,225 @@
+import asyncio
+import logging
+import random
+import os
+
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
+
+# =========================
+# CONFIG
+# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
+
+MIN_NUMBER = 1
+MAX_NUMBER = 100
+MAX_ATTEMPTS = 10
+
+# =========================
+# KEYBOARDS
+# =========================
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎮 Начать игру")],
+            [KeyboardButton(text="❓ Помощь")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие...",
+    )
+
+
+def game_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏳️ Сдаться")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Введите число от 1 до 100...",
+    )
+
+# =========================
+# STATES
+# =========================
+class GameStates(StatesGroup):
+    waiting_for_guess = State()
+
+# =========================
+# HELPERS
+# =========================
+def get_hint(guess: int, secret: int) -> str:
+    diff = abs(guess - secret)
+    if diff <= 3:
+        return "🔥 Очень горячо!"
+    if diff <= 10:
+        return "🌡️ Тепло."
+    if diff <= 25:
+        return "❄️ Холодно."
+    return "🧊 Очень холодно!"
+
+# =========================
+# ROUTER & HANDLERS
+# =========================
+router = Router()
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        f"Привет, <b>{message.from_user.first_name}</b>! 👋\n\n"
+        f"Я бот для игры «Угадай число».\n"
+        f"Нажми <b>🎮 Начать игру</b>, чтобы попробовать!",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
+async def cmd_help(message: Message):
+    await message.answer(
+        "📖 <b>Правила игры</b>\n\n"
+        "1. Я загадываю число от 1 до 100.\n"
+        "2. У тебя 10 попыток, чтобы его угадать.\n"
+        "3. После каждой попытки я подсказываю:\n"
+        "   • 📈 моё число больше или 📉 меньше\n"
+        "   • 🔥 насколько близко ты угадал\n\n"
+        "<b>Команды:</b>\n"
+        "/start — главное меню\n"
+        "/game — начать новую игру\n"
+        "/help — помощь",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(Command("game"))
+@router.message(F.text == "🎮 Начать игру")
+async def start_game(message: Message, state: FSMContext):
+    secret = random.randint(MIN_NUMBER, MAX_NUMBER)
+    await state.update_data(secret=secret, attempts=0)
+    await state.set_state(GameStates.waiting_for_guess)
+
+    await message.answer(
+        f"🎲 <b>Игра «Угадай число»!</b>\n\n"
+        f"Я загадал число от <b>{MIN_NUMBER}</b> до <b>{MAX_NUMBER}</b>.\n"
+        f"У тебя <b>{MAX_ATTEMPTS}</b> попыток.\n\n"
+        f"Введи своё предположение 👇",
+        reply_markup=game_keyboard(),
+    )
+
+
+@router.message(F.text == "🏳️ Сдаться")
+async def give_up(message: Message, state: FSMContext):
+    data = await state.get_data()
+    secret = data.get("secret")
+
+    if secret is None:
+        await message.answer("Ты сейчас не в игре. Начни новую! 🎮")
+        return
+
+    await state.clear()
+    await message.answer(
+        f"🏳️ Ты сдался. Загаданное число было: <b>{secret}</b>",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(GameStates.waiting_for_guess)
+async def process_guess(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+
+    if not text.isdigit():
+        await message.answer("⚠️ Пожалуйста, введи целое число.")
+        return
+
+    guess = int(text)
+
+    if not MIN_NUMBER <= guess <= MAX_NUMBER:
+        await message.answer(
+            f"⚠️ Число должно быть в диапазоне от {MIN_NUMBER} до {MAX_NUMBER}."
+        )
+        return
+
+    data = await state.get_data()
+    secret: int = data["secret"]
+    attempts: int = data["attempts"] + 1
+    await state.update_data(attempts=attempts)
+
+    remaining = MAX_ATTEMPTS - attempts
+
+    if guess == secret:
+        await state.clear()
+        await message.answer(
+            f"🎉 <b>Поздравляю!</b>\n\n"
+            f"Ты угадал число <b>{secret}</b> с {attempts}-й попытки!",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if remaining <= 0:
+        await state.clear()
+        await message.answer(
+            f"😢 <b>Попытки закончились!</b>\n\n"
+            f"Загаданное число было: <b>{secret}</b>",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    hint = get_hint(guess, secret)
+    direction = (
+        "📉 Моё число <b>меньше</b>"
+        if guess > secret
+        else "📈 Моё число <b>больше</b>"
+    )
+
+    await message.answer(
+        f"{direction} твоего {guess}.\n"
+        f"{hint}\n\n"
+        f"Осталось попыток: <b>{remaining}</b>"
+    )
+
+
+@router.message()
+async def fallback(message: Message):
+    await message.answer(
+        "🤔 Не понял тебя.\n"
+        "Нажми <b>🎮 Начать игру</b> или /help.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+# =========================
+# MAIN
+# =========================
+async def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Bot is running...")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("🛑 Bot stopped.")
